@@ -1,6 +1,6 @@
 module Control.Coroutine.Transducer
   ( Transducer
-  , fuse
+  , fuse, (.|)
   , awaitT
   , awaitForever
   , yieldT
