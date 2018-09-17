@@ -1,5 +1,5 @@
 {
-  "name": "purescript-coroutine-pipelines",
+  "name": "purescript-coroutine-transducers",
   "ignore": [
     "**/.*",
     "node_modules",
