@@ -7,15 +7,9 @@
     "output"
   ],
   "dependencies": {
-    "purescript-prelude": "^4.1.0",
-    "purescript-console": "^4.1.0",
-    "purescript-freet": "^4.0.0",
-    "purescript-functors": "^3.0.1",
-    "purescript-parallel": "^4.0.0",
-    "purescript-coroutines": "^5.0.0",
-    "purescript-aff": "^5.0.2"
+    "purescript-coroutines": "^5.0.0"
   },
-  "devDependencies": {
-    "purescript-psci-support": "^4.0.0"
+  "dev-dependencies": {
+    "purescript-aff": "^5.0.0"
   }
 }
