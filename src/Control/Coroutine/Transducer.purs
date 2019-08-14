@@ -58,7 +58,7 @@ fuse t1 t2 = freeT \_ -> go (Tuple t1 t2)
     proceed c (Right (Coproduct (Right s))) = pure (Right $ right $ map (fuse $ freeT $ \_ -> pure c) s)
     proceed (Right (Coproduct (Right (Tuple o next)))) (Right (Coproduct (Left f))) = resume (next `fuse` f (Just o))
     proceed (Right (Coproduct (Right (Tuple o next)))) (Left y) = resume (next `fuse` pure y)
-    proceed (Left x) (Right (Coproduct (Left f))) = resume (pure x `fuse` f Nothing)
+    proceed (Left z) (Right (Coproduct (Left f))) = resume (pure z `fuse` f Nothing)
     proceed (Left x) (Left y) = pure <<< Left $ (Tuple x y)
 
 infixr 2 fuse as =>=
