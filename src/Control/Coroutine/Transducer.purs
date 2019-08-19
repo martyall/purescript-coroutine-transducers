@@ -28,6 +28,7 @@ import Control.Parallel (class Parallel, parallel, sequential)
 import Data.Either (Either(..), either)
 import Data.Functor.Coproduct (Coproduct(..), left, right)
 import Data.Maybe (Maybe(..), maybe)
+import Data.These (These(..))
 import Data.Traversable (traverse_)
 import Data.Tuple (Tuple(..))
 import Partial.Unsafe (unsafePartial)
@@ -67,6 +68,30 @@ fuse t1 t2 = freeT \_ -> go t1 t2
     proceed   (Right (Coproduct (Right (Tuple o next))))   (Left y)                          = resume $ next `fuse` pure y
     proceed   (Left x)                                     (Right (Coproduct (Left f)))      = resume $ pure x `fuse` f Nothing
     proceed   (Left x)                                     (Left y)                          = pure $ Left $ (Tuple x y)
+
+fuseT
+  :: forall a b c m par x y.
+     MonadRec m
+  => Parallel par m
+  => Transducer a b m x
+  -> Transducer b c m y
+  -> Transducer a c m (These x y)
+fuseT t1 t2 = freeT \_ -> go t1 t2
+  where
+    go t1' t2' = join $ sequential $ ado
+      a <- parallel $ resume t1'
+      b <- parallel $ resume t2'
+      in proceed a b
+
+    proceed   (Right (Coproduct (Left f)))               c@(Right (Coproduct (Right _)))     = pure $ Right $ left  $ f <#> flip fuseT (freeT $ \_ -> pure c)
+    proceed   (Right (Coproduct (Left f)))               c@(Right (Coproduct (Left _)))      = pure $ Right $ left  $ f <#> flip fuseT (freeT $ \_ -> pure c)
+    proceed   (Right (Coproduct (Left f)))                 (Left y)                          = pure $ Left $ That y
+    proceed   (Left x)                                     (Right (Coproduct (Right s)))     = pure $ Left $ This x
+    proceed c@(Right (Coproduct (Right (Tuple _ _))))      (Right (Coproduct (Right s)))     = pure $ Right $ right $ fuseT (freeT $ \_ -> pure c) <$> s
+    proceed   (Right (Coproduct (Right (Tuple o next))))   (Right (Coproduct (Left f)))      = resume $ next `fuseT` f (Just o)
+    proceed   (Right (Coproduct (Right (Tuple o next))))   (Left y)                          = pure $ Left $ That y
+    proceed   (Left x)                                     (Right (Coproduct (Left f)))      = pure $ Left $ This x
+    proceed   (Left x)                                     (Left y)                          = pure $ Left $ Both x y
 
 infixr 2 fuse as =>=
 
