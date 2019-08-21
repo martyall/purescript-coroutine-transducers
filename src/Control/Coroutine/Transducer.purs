@@ -21,7 +21,7 @@ module Control.Coroutine.Transducer
 import Prelude
 
 import Control.Coroutine (Await(..), Co, CoTransform(..), CoTransformer, Consumer, Emit(..), Process, Producer, Transform(..), Transformer, loop)
-import Control.Monad.Free.Trans (freeT, interpret, resume)
+import Control.Monad.Free.Trans (freeT, interpret, liftFreeT, resume, substFreeT)
 import Control.Monad.Rec.Class (class MonadRec)
 import Control.Monad.Trans.Class (lift)
 import Control.Parallel (class Parallel, parallel, sequential)
@@ -31,8 +31,6 @@ import Data.Maybe (Maybe(..), maybe)
 import Data.These (These(..))
 import Data.Traversable (traverse_)
 import Data.Tuple (Tuple(..))
-import Partial.Unsafe (unsafePartial)
-import Unsafe.Coerce (unsafeCoerce)
 
 
 type Transduce i o = Coproduct (Function (Maybe i)) (Tuple o)
@@ -192,15 +190,17 @@ fromProducer :: forall m o r. Monad m => Producer o m r -> Transducer Void o m r
 fromProducer = interpret (\(Emit o a) -> right $ Tuple o a)
 
 toProducer :: forall m o r. Monad m => Transducer Void o m r -> Producer o m r
-toProducer = interpret (unsafePartial $ case _ of
-  Coproduct (Right (Tuple o a)) -> Emit o a)
+toProducer = substFreeT case _ of
+  Coproduct (Left f) -> pure (f Nothing)
+  Coproduct (Right (Tuple o a)) -> liftFreeT $ Emit o a
 
 fromConsumer :: forall m i r. Monad m => Consumer (Maybe i) m r -> Transducer i Void m r
 fromConsumer = interpret (\(Await f) -> left f)
 
 toConsumer :: forall m i r. Monad m => Transducer i Void m r -> Consumer (Maybe i) m r
-toConsumer = interpret (unsafePartial $ case _ of
-  Coproduct (Left f) -> Await f)
+toConsumer = interpret case _ of
+  Coproduct (Left f) -> Await f
+  Coproduct (Right (Tuple void' _)) -> absurd void'
 
 fromTransformer :: forall i o m x. MonadRec m => Transformer i o m x -> Transducer i o m Unit
 fromTransformer t = do
@@ -226,5 +226,7 @@ fromCoTransformer t = do
       mi <- awaitT
       maybe (pure unit) (fromCoTransformer <<< f) mi
 
-toProcess :: forall m x. Functor m => Transducer Void Void m x -> Process m x
-toProcess = interpret (unsafeCoerce unit)
+toProcess :: forall m x. Monad m => Transducer Void Void m x -> Process m x
+toProcess = substFreeT case _ of
+  Coproduct (Left f) -> pure (f Nothing)
+  Coproduct (Right (Tuple void' _)) -> absurd void'
