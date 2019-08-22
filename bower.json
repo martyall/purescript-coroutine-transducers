@@ -7,13 +7,10 @@
     "output"
   ],
   "dependencies": {
-    "purescript-freet": "safareli/purescript-freet#patch-1",
+    "purescript-freet": "^4.1.0",
     "purescript-coroutines": "^5.0.0"
   },
-  "dev-dependencies": {
+  "devDependencies": {
     "purescript-aff": "^5.0.0"
-  },
-  "resolutions": {
-    "purescript-freet": "patch-1"
   }
 }
