@@ -2,59 +2,55 @@ module Test.Main where
 
 import Prelude
 
-import Control.Coroutine (($$), ($~), (~$), (/\))
-import Control.Coroutine as Co
 import Control.Coroutine.Transducer as T
-import Control.Monad.Rec.Class (forever)
-import Control.Monad.Trans.Class (lift)
-import Data.Maybe (Maybe(..))
-import Data.Newtype (wrap)
+import Control.Monad.Rec.Class (class MonadRec, whileJust)
+import Control.Parallel (class Parallel)
+import Data.Array (range)
+import Data.Array as Array
+import Data.Foldable (for_)
+import Data.Traversable (traverse)
+import Data.Tuple (snd)
 import Effect (Effect)
-import Effect.Aff (Aff, delay, launchAff)
+import Effect.Aff (Aff, Milliseconds(..), delay, launchAff)
 import Effect.Class (liftEffect)
-import Effect.Console (log)
+import Effect.Class.Console (log)
+import Test.Assert (assert')
 
-nats :: Co.Producer Int Aff Unit
-nats = go 0
-  where
-  go i = do
-    Co.emit i
-    lift (delay (wrap 10.0)) -- 10ms delay
-    go (i + 1)
+naturals10 :: T.Producer Int Aff Unit
+naturals10 = for_ (range 1 10) T.yieldT
 
-printer :: Co.Consumer (Maybe String) Aff Unit
-printer = forever do
-  ms <- Co.await
-  case ms of
-    Nothing -> pure Nothing
-    Just s -> do
-      lift (liftEffect (log s))
-      pure Nothing
+delayT :: forall i. Number -> T.Transducer i i Aff Unit
+delayT ms = T.transformForever \input ->
+  input <$ delay (Milliseconds ms)
 
-showing :: forall a m. Show a => Monad m => Co.Transformer a String m Unit
-showing = forever (Co.transform show)
+foreverPrinter :: String -> T.Transducer String String Aff Unit
+foreverPrinter prefix = T.transformForever \input ->
+  input <$ log (prefix <> "| " <> input)
 
-coshowing :: Co.CoTransformer String Int Aff Unit
-coshowing = go 0
-  where
-  go i = do
-    o <- Co.cotransform i
-    lift (liftEffect (log o))
-    go (i + 1)
+drain :: forall i. T.Transducer i Void Aff (Array i)
+drain = whileJust $ T.awaitT >>= traverse (Array.singleton >>> pure)
+
+fuse'r
+  :: forall a b c m par x y.
+     MonadRec m
+  => Parallel par m
+  => T.Transducer a b m x
+  -> T.Transducer b c m y
+  -> T.Transducer a c m y
+fuse'r a b = T.fuse a b <#> snd
+
+infixr 2 fuse'r as =>=|
 
 main :: Effect Unit
 main = void $ launchAff do
-  Co.runProcess ((nats $~ Co.composeTransformers showing (Co.transform Just)) $$ printer)
-  void $ Co.runProcess ( T.toProcess $ (
-                  T.fromProducer nats T.=>=
-                  T.fromTransformer showing T.=>=
-                  T.fromConsumer printer
-                  )
-                )
-  Co.runProcess (nats /\ nats $$ Co.composeTransformers showing (forever $ Co.transform Just) ~$ printer)
-  void $ Co.runProcess (T.toProcess $ (
-                    T.fromProducer (nats /\ nats) T.=>=
-                    T.fromTransformer showing T.=>=
-                    T.fromConsumer printer
-                    )
-                )
+  res <- T.runProcess
+    $ naturals10
+    =>=| delayT 100.0
+    =>=| T.awaitForever (show >>> T.yieldT)
+    =>=| foreverPrinter "A"
+    =>=| delayT 100.0
+    =>=| T.awaitForever (show >>> T.yieldT)
+    =>=| foreverPrinter "B"
+    =>=| drain
+  liftEffect $ assert' "test 1 res is valid"
+    $ ["\"1\"","\"2\"","\"3\"","\"4\"","\"5\"","\"6\"","\"7\"","\"8\"","\"9\"","\"10\""] == res

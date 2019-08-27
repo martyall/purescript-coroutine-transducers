@@ -1,14 +1,29 @@
 module Control.Coroutine.Transducer
   ( Transducer
+  , Producer
+  , Consumer
+  , Process
+  
   , Transduce
+
   , fuse, (=>=)
+  , fuseL
+  , fuseR
+  , fuseT
+
+  , runProcess
   , awaitT
   , awaitForever
   , yieldT
   , transform
   , transformM
+  , transformForever
+  , producer
+  , consumer
+  
   , liftStateless
   , liftStateful
+
   , fromProducer
   , toProducer
   , fromConsumer
@@ -16,27 +31,32 @@ module Control.Coroutine.Transducer
   , fromTransformer
   , fromCoTransformer
   , toProcess
+
   ) where
 
 import Prelude
 
-import Control.Coroutine (Await(..), Co, CoTransform(..), CoTransformer, Consumer, Emit(..), Process, Producer, Transform(..), Transformer, loop)
-import Control.Monad.Free.Trans (freeT, interpret, liftFreeT, resume, substFreeT)
-import Control.Monad.Rec.Class (class MonadRec)
+import Control.Coroutine (Await(..), Co, CoTransform(..), CoTransformer, Consumer, Emit(..), Process, Producer, Transform(..), Transformer) as Co
+import Control.Monad.Free.Trans (freeT, interpret, liftFreeT, resume, runFreeT, substFreeT)
+import Control.Monad.Rec.Class (class MonadRec, whileJust, untilJust)
 import Control.Monad.Trans.Class (lift)
 import Control.Parallel (class Parallel, parallel, sequential)
 import Data.Either (Either(..), either)
 import Data.Functor.Coproduct (Coproduct(..), left, right)
 import Data.Maybe (Maybe(..), maybe)
 import Data.These (These(..))
-import Data.Traversable (traverse_)
+import Data.Traversable (traverse, traverse_)
 import Data.Tuple (Tuple(..))
 
 
 type Transduce i o = Coproduct (Function (Maybe i)) (Tuple o)
 
 
-type Transducer i o = Co (Transduce i o)
+type Transducer i o = Co.Co (Transduce i o)
+
+type Producer o = Transducer Void o
+type Consumer i = Transducer i    Void
+type Process    = Transducer Void Void
 
 -- | The `fuse` operator runs an upstream and downstream `Transducer` in parallel. In the event that
 -- | the upstream pauses with an emit statement and the downstream with an await statement,
@@ -140,31 +160,55 @@ fuseR t1 t2 = freeT \_ -> go t1 t2
     proceed   (Right (Coproduct (Right (Tuple o next))))   (Coproduct (Left f))      = resume $ next `fuseR` f (Just o)
     proceed   (Left x)                                     (Coproduct (Left f))      = resume $ pure x `fuseR` f Nothing
 
--- | Await an upstream value.
+-- | Run a `Process` to completion.
+runProcess :: forall m a. MonadRec m => Process m a -> m a
+runProcess = runFreeT case _ of
+  Coproduct (Left f) -> pure (f Nothing)
+  Coproduct (Right (Tuple void' _)) -> absurd void'
+
+-- | Await an upstream value. returns Nothing if upstream is finished
 awaitT :: forall i o m. Monad m => Transducer i o m (Maybe i)
-awaitT = freeT $ \_ -> pure <<< Right $ (left pure)
+awaitT = freeT \_ -> pure $ Right $ left pure
 
 -- | Continue waiting for upstream values, while never returning.
-awaitForever :: forall i o m r. Monad m => (i -> Transducer i o m r) -> Transducer i o m Unit
-awaitForever send = loop do
-  mi <- awaitT
-  case mi of
-    Nothing -> pure $ Just unit
-    Just i -> send i $> Nothing
+awaitForever :: forall i o m. Monad m => (i -> Transducer i o m Unit) -> Transducer i o m Unit
+awaitForever f = whileJust $ awaitT >>= traverse f
 
 -- | Yield a value to downstream
 yieldT :: forall i o m. Monad m => o -> Transducer i o m Unit
-yieldT o = freeT $ \_ -> pure <<< Right $ (right $ Tuple o (pure unit))
+yieldT o = freeT $ \_ -> pure $ Right $ right $ Tuple o $ pure unit
 
 -- | Create a `Transducer` from a pure function.
 transform :: forall i o m. Monad m => (i -> o) -> Transducer i o m Unit
-transform f = transformM (pure <<< f)
+transform f = transformM (f >>> pure)
 
 -- | Create a `Transducer` from an effectful function.
 transformM :: forall i o m. Monad m => (i -> m o) -> Transducer i o m Unit
-transformM f = do
-  mi <- awaitT
-  maybe (pure unit) (\i -> lift (f i) >>= yieldT) mi
+transformM f = awaitT >>= maybe (pure unit) (f >>> lift >=> yieldT)
+
+-- | Create a `Transducer` from an effectful function.
+transformForever :: forall i o m. Monad m => (i -> m o) -> Transducer i o m Unit
+transformForever f = whileJust $ awaitT >>= traverse (f >>> lift >=> yieldT)
+
+
+-- | Create a `Producer` by providing a monadic function that produces values.
+-- |
+-- | The function should return a value of type `r` at most once, when the
+-- | `Producer` is ready to close.
+producer :: forall o m r. Monad m => m (Either o r) -> Producer o m r
+producer recv = untilJust $ lift recv >>= case _ of
+  Left o -> yieldT o $> Nothing
+  Right r -> pure (Just r)
+
+
+-- | Create a `Consumer` by providing a handler function which consumes values.
+-- |
+-- | The handler function should return a value of type `r` at most once, when the
+-- | `Consumer` is ready to close. if upstream terminates consumer finishes with Nothing
+consumer :: forall i m r. Monad m => (i -> m (Maybe r)) -> Consumer i m (Maybe r)
+consumer send = untilJust $ awaitT >>= case _ of
+  Nothing -> pure $ Just Nothing
+  Just a -> lift $ map Just <$> send a
 
 --------------------------------------------------------------------------------
 --  Stateful pipelines
@@ -186,28 +230,28 @@ liftStateful f eof s = do
 -- Interactions with Control.Coroutine `Producer`s and `Consumer`s
 --------------------------------------------------------------------------------
 
-fromProducer :: forall m o r. Monad m => Producer o m r -> Transducer Void o m r
-fromProducer = interpret (\(Emit o a) -> right $ Tuple o a)
+fromProducer :: forall m o r. Monad m => Co.Producer o m r -> Transducer Void o m r
+fromProducer = interpret (\(Co.Emit o a) -> right $ Tuple o a)
 
-toProducer :: forall m o r. Monad m => Transducer Void o m r -> Producer o m r
+toProducer :: forall m o r. Monad m => Transducer Void o m r -> Co.Producer o m r
 toProducer = substFreeT case _ of
   Coproduct (Left f) -> pure (f Nothing)
-  Coproduct (Right (Tuple o a)) -> liftFreeT $ Emit o a
+  Coproduct (Right (Tuple o a)) -> liftFreeT $ Co.Emit o a
 
-fromConsumer :: forall m i r. Monad m => Consumer (Maybe i) m r -> Transducer i Void m r
-fromConsumer = interpret (\(Await f) -> left f)
+fromConsumer :: forall m i r. Monad m => Co.Consumer (Maybe i) m r -> Transducer i Void m r
+fromConsumer = interpret (\(Co.Await f) -> left f)
 
-toConsumer :: forall m i r. Monad m => Transducer i Void m r -> Consumer (Maybe i) m r
+toConsumer :: forall m i r. Monad m => Transducer i Void m r -> Co.Consumer (Maybe i) m r
 toConsumer = interpret case _ of
-  Coproduct (Left f) -> Await f
+  Coproduct (Left f) -> Co.Await f
   Coproduct (Right (Tuple void' _)) -> absurd void'
 
-fromTransformer :: forall i o m x. MonadRec m => Transformer i o m x -> Transducer i o m Unit
+fromTransformer :: forall i o m x. MonadRec m => Co.Transformer i o m x -> Transducer i o m Unit
 fromTransformer t = do
     a <- lift $ resume t
     either (const $ pure unit) go a
   where
-   go (Transform f) = do
+   go (Co.Transform f) = do
      mi <- awaitT
      case mi of
        Nothing -> pure unit
@@ -216,17 +260,17 @@ fromTransformer t = do
          yieldT o
          fromTransformer k
 
-fromCoTransformer :: forall i o m x. MonadRec m => CoTransformer i o m x -> Transducer i o m Unit
+fromCoTransformer :: forall i o m x. MonadRec m => Co.CoTransformer i o m x -> Transducer i o m Unit
 fromCoTransformer t = do
     a <- lift $ resume t
     either (const $ pure unit) go a
   where
-    go (CoTransform o f) = do
+    go (Co.CoTransform o f) = do
       yieldT o
       mi <- awaitT
       maybe (pure unit) (fromCoTransformer <<< f) mi
 
-toProcess :: forall m x. Monad m => Transducer Void Void m x -> Process m x
+toProcess :: forall m x. Monad m => Transducer Void Void m x -> Co.Process m x
 toProcess = substFreeT case _ of
   Coproduct (Left f) -> pure (f Nothing)
   Coproduct (Right (Tuple void' _)) -> absurd void'
